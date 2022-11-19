@@ -31,7 +31,7 @@ namespace Prometheus
                 LabelNames = new[] { "source", "name", "display_name" }
             });
 
-            _listener = new Listener(OnEventSourceCreated, OnEventWritten);
+            _listener = new Listener(OnEventSourceCreated, ConfigureEventSource, OnEventWritten);
         }
 
         public void Dispose()
@@ -53,6 +53,11 @@ namespace Prometheus
         private bool OnEventSourceCreated(EventSource source)
         {
             return _options.EventSourceFilterPredicate(source.Name);
+        }
+
+        private EventCounterAdapterEventSourceSettings ConfigureEventSource(EventSource source)
+        {
+            return _options.EventSourceSettingsProvider(source.Name);
         }
 
         private void OnEventWritten(EventWrittenEventArgs args)
@@ -117,9 +122,13 @@ namespace Prometheus
 
         private sealed class Listener : EventListener
         {
-            public Listener(Func<EventSource, bool> onEventSourceCreated, Action<EventWrittenEventArgs> onEventWritten)
+            public Listener(
+                Func<EventSource, bool> onEventSourceCreated, 
+                Func<EventSource, EventCounterAdapterEventSourceSettings> configureEventSosurce,
+                Action<EventWrittenEventArgs> onEventWritten)
             {
                 _onEventSourceCreated = onEventSourceCreated;
+                _configureEventSosurce = configureEventSosurce;
                 _onEventWritten = onEventWritten;
 
                 foreach (var eventSource in _preRegisteredEventSources)
@@ -131,6 +140,7 @@ namespace Prometheus
             private readonly List<EventSource> _preRegisteredEventSources = new List<EventSource>();
 
             private readonly Func<EventSource, bool> _onEventSourceCreated;
+            private readonly Func<EventSource, EventCounterAdapterEventSourceSettings> _configureEventSosurce;
             private readonly Action<EventWrittenEventArgs> _onEventWritten;
 
             protected override void OnEventSourceCreated(EventSource eventSource)
@@ -147,10 +157,21 @@ namespace Prometheus
                 if (!_onEventSourceCreated(eventSource))
                     return;
 
-                EnableEvents(eventSource, EventLevel.Verbose, EventKeywords.All, new Dictionary<string, string?>()
+                try
                 {
-                    ["EventCounterIntervalSec"] = "1"
-                });
+                    var options = _configureEventSosurce(eventSource);
+
+                    EnableEvents(eventSource, options.MinimumLevel, options.MatchKeywords, new Dictionary<string, string?>()
+                    {
+                        ["EventCounterIntervalSec"] = "1"
+                    });
+                }
+                catch (Exception ex)
+                {
+                    // Eat exceptions here to ensure no harm comes of failed enabling.
+                    // The EventCounter infrastructure has proven quite buggy and while it is not certain that this may throw, let's be paranoid.
+                    Console.WriteLine($"Failed to enable EventCounter listening for {eventSource.Name}: {ex.Message}");
+                }                
             }
 
             protected override void OnEventWritten(EventWrittenEventArgs eventData)
